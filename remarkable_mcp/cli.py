@@ -213,7 +213,7 @@ Streamable HTTP Security:
         from remarkable_mcp.api import register_and_get_token
 
         try:
-            print(f"Registering with reMarkable using code: {args.register}")
+            print("Registering with reMarkable...")
             register_and_get_token(args.register)
             print("\nRegistration complete.")
             print("The credential was saved to ~/.rmapi.")

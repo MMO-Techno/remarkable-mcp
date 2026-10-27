@@ -6516,6 +6516,7 @@ class TestCLIFlags:
         assert "Registration complete." in output
         assert "~/.rmapi" in output
         assert "secret-value" not in output
+        assert "one-time-code" not in output
         assert "REMARKABLE_TOKEN" not in output
 
     def test_write_and_read_only_mutually_exclusive(self):
