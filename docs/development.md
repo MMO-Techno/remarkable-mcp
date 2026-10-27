@@ -215,6 +215,8 @@ The workflow automatically:
 | `REMARKABLE_SSH_KEY` | Explicit private key path |
 | `REMARKABLE_READ_ONLY` | Disable write tools |
 | `REMARKABLE_ROOT_PATH` | Scope document access to one folder |
+| `REMARKABLE_UPLOAD_MAX_BYTES` | Largest local file `remarkable_upload` will read (default 200 MiB) |
+| `REMARKABLE_UPLOAD_DIRS` | `os.pathsep`-separated directories `remarkable_upload` may read from (unset: any) |
 | `REMARKABLE_MCP_HOST` | Streamable HTTP bind address |
 | `REMARKABLE_MCP_PORT` | Streamable HTTP port |
 | `GOOGLE_VISION_API_KEY` | Google Vision API key for OCR |

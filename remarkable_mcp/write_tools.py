@@ -22,11 +22,13 @@ no external Go binary required.
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import shlex
 import socket
+import stat
 import threading
 import time
 import uuid
@@ -727,6 +729,86 @@ def _write_remote_bytes(ssh_client: SSHClient, remote_path: str, data: bytes) ->
         _upload_file_bytes(ssh_client, tmp_path, remote_path)
     finally:
         os.unlink(tmp_path)
+
+
+DEFAULT_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
+
+# Set by remarkable_markdown_to_pdf for the temporary PDF it renders itself, so
+# the REMARKABLE_UPLOAD_DIRS allowlist (meant for caller-supplied paths) does
+# not reject the server's own scratch file.
+_internal_upload_path: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_internal_upload_path", default=None
+)
+
+
+def _upload_max_bytes() -> int:
+    """Maximum local file size remarkable_upload will read (REMARKABLE_UPLOAD_MAX_BYTES)."""
+    try:
+        value = int(os.environ.get("REMARKABLE_UPLOAD_MAX_BYTES", DEFAULT_UPLOAD_MAX_BYTES))
+    except (TypeError, ValueError):
+        return DEFAULT_UPLOAD_MAX_BYTES
+    return value if value > 0 else DEFAULT_UPLOAD_MAX_BYTES
+
+
+def _upload_allowed_dirs() -> list:
+    """Resolved REMARKABLE_UPLOAD_DIRS entries (os.pathsep-separated), or [] if unset."""
+    raw = os.environ.get("REMARKABLE_UPLOAD_DIRS", "")
+    return [
+        os.path.realpath(os.path.expanduser(entry.strip()))
+        for entry in raw.split(os.pathsep)
+        if entry.strip()
+    ]
+
+
+def _check_upload_path(file_path: str, internal_path: Optional[str] = None) -> tuple:
+    """Validate a local file the caller asked us to upload.
+
+    Returns ``(resolved_path, None)`` on success or ``(None, error_json)``.
+    The path is resolved (following symlinks) and the *target* must be a
+    regular .pdf/.epub file no larger than REMARKABLE_UPLOAD_MAX_BYTES. When
+    REMARKABLE_UPLOAD_DIRS is set, the target must also live inside one of
+    those directories (``internal_path``, a file the server created itself, is
+    exempt from that allowlist).
+    """
+    resolved = os.path.realpath(os.path.expanduser(file_path))
+    try:
+        st = os.stat(resolved)
+    except OSError:
+        st = None
+    if st is None or not stat.S_ISREG(st.st_mode):
+        return None, make_error(
+            error_type="file_not_found",
+            message=f"File not found: '{file_path}'",
+            suggestion="Provide an absolute path to an existing PDF or EPUB file.",
+        )
+
+    for path in (file_path, resolved):
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        if ext not in ("pdf", "epub"):
+            return None, make_error(
+                error_type="unsupported_format",
+                message=f"Unsupported file format: '.{ext}'",
+                suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
+            )
+
+    allowed = _upload_allowed_dirs()
+    if allowed and resolved != internal_path:
+        if not any(os.path.commonpath([resolved, d]) == d for d in allowed):
+            return None, make_error(
+                error_type="upload_path_not_allowed",
+                message=f"'{file_path}' is outside the directories allowed for upload.",
+                suggestion="Move the file into a directory listed in REMARKABLE_UPLOAD_DIRS.",
+            )
+
+    max_bytes = _upload_max_bytes()
+    if st.st_size > max_bytes:
+        return None, make_error(
+            error_type="file_too_large",
+            message=f"File is {st.st_size} bytes; the upload limit is {max_bytes} bytes.",
+            suggestion="Raise REMARKABLE_UPLOAD_MAX_BYTES if this file is expected.",
+        )
+
+    return resolved, None
 
 
 def _upload_filename(local_path: str, document_name: Optional[str] = None) -> str:
@@ -1652,7 +1734,9 @@ def register_write_tools():
         Requires write mode (the default; disabled with --read-only).
         </instructions>
         <parameters>
-        - file_path: Absolute path to the local PDF or EPUB file
+        - file_path: Absolute path to the local PDF or EPUB file. Symlinks are
+          resolved; the target must be a regular file within the server's size
+          limit and, if configured, inside REMARKABLE_UPLOAD_DIRS.
         - parent_folder: Destination folder path on tablet (default: root "/").
           Honored in cloud and SSH modes; ignored by the USB web interface.
         - document_name: Display name on tablet (default: filename without
@@ -1676,27 +1760,21 @@ def register_write_tools():
         </examples>
         """
 
+        # Read here: SSH/USB operations may run _impl on a worker thread that
+        # does not inherit this task's context.
+        internal_path = _internal_upload_path.get()
+
         def _impl() -> str:
             error = _require_write_transport()
             if error:
                 return error
 
             try:
-                # Validate file
-                if not os.path.isfile(file_path):
-                    return make_error(
-                        error_type="file_not_found",
-                        message=f"File not found: '{file_path}'",
-                        suggestion="Provide an absolute path to an existing PDF or EPUB file.",
-                    )
-
-                ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-                if ext not in ("pdf", "epub"):
-                    return make_error(
-                        error_type="unsupported_format",
-                        message=f"Unsupported file format: '.{ext}'",
-                        suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
-                    )
+                # Validate file (resolves symlinks; size cap; optional allowlist)
+                local_path, path_error = _check_upload_path(file_path, internal_path)
+                if path_error:
+                    return path_error
+                ext = os.path.splitext(local_path)[1].lower().lstrip(".")
 
                 # Cloud mode: upload via the sync v3/v4 blob protocol
                 if _is_cloud_mode():
@@ -1714,7 +1792,7 @@ def register_write_tools():
                         )
 
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
-                    with open(file_path, "rb") as f:
+                    with open(local_path, "rb") as f:
                         data = f.read()
                     doc = client.upload_document(data, name, ext, parent_id)
                     return make_response(
@@ -1741,7 +1819,7 @@ def register_write_tools():
                             ),
                             suggestion="Use SSH or cloud mode to upload into the root folder.",
                         )
-                    _upload_via_usb_web(file_path, document_name)
+                    _upload_via_usb_web(local_path, document_name)
 
                     name = document_name or os.path.splitext(os.path.basename(file_path))[0]
 
@@ -1790,7 +1868,7 @@ def register_write_tools():
 
                 # Upload the file
                 remote_file = f"{XOCHITL_PATH}/{doc_uuid}.{ext}"
-                _upload_file_bytes(ssh_client, file_path, remote_file)
+                _upload_file_bytes(ssh_client, local_path, remote_file)
 
                 # Create metadata
                 metadata = {
@@ -1941,12 +2019,16 @@ def register_write_tools():
             pdf_path = os.path.join(temp_dir, "document.pdf")
             with open(pdf_path, "wb") as pdf_file:
                 pdf_file.write(pdf_bytes)
-            return await remarkable_upload(
-                pdf_path,
-                parent_folder=parent_folder,
-                document_name=document_name,
-                defer_restart=defer_restart,
-            )
+            token = _internal_upload_path.set(os.path.realpath(pdf_path))
+            try:
+                return await remarkable_upload(
+                    pdf_path,
+                    parent_folder=parent_folder,
+                    document_name=document_name,
+                    defer_restart=defer_restart,
+                )
+            finally:
+                _internal_upload_path.reset(token)
 
     if _is_ssh_mode() or _is_cloud_mode():
 

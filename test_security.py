@@ -315,3 +315,110 @@ class TestWriteToolRootPathDispatch:
             )
         assert data["_error"]["type"] == "root_path_unsupported"
         upload.assert_not_called()
+
+
+def _upload_client():
+    client = Mock(spec=["get_meta_items", "upload_document"])
+    client.get_meta_items.return_value = []
+    client.upload_document.return_value = Mock(id="new-doc")
+    return client
+
+
+class TestUploadLocalPathPolicy:
+    async def _upload(self, path, client=None, **env):
+        client = client or _upload_client()
+        data = await _call_write_tool("remarkable_upload", {"file_path": str(path)}, client, **env)
+        return data, client
+
+    @pytest.mark.asyncio
+    async def test_regular_pdf_uploads(self, tmp_path):
+        pdf = tmp_path / "Paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        data, client = await self._upload(pdf)
+        assert data["uploaded"] is True
+        client.upload_document.assert_called_once_with(b"%PDF-1.4\n", "Paper", "pdf", "")
+
+    @posix_only
+    @pytest.mark.asyncio
+    async def test_symlink_named_pdf_to_other_file_is_refused(self, tmp_path):
+        secret = tmp_path / "id_ed25519"
+        secret.write_text("PRIVATE KEY")
+        link = tmp_path / "innocent.pdf"
+        link.symlink_to(secret)
+        data, client = await self._upload(link)
+        assert data["_error"]["type"] == "unsupported_format"
+        client.upload_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_directory_is_refused(self, tmp_path):
+        folder = tmp_path / "folder.pdf"
+        folder.mkdir()
+        data, client = await self._upload(folder)
+        assert data["_error"]["type"] == "file_not_found"
+        client.upload_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_size_cap(self, tmp_path):
+        pdf = tmp_path / "big.pdf"
+        pdf.write_bytes(b"x" * 11)
+        data, client = await self._upload(pdf, REMARKABLE_UPLOAD_MAX_BYTES="10")
+        assert data["_error"]["type"] == "file_too_large"
+        client.upload_document.assert_not_called()
+
+    def test_size_cap_default_and_invalid_values(self, monkeypatch):
+        from remarkable_mcp.write_tools import DEFAULT_UPLOAD_MAX_BYTES, _upload_max_bytes
+
+        assert DEFAULT_UPLOAD_MAX_BYTES == 200 * 1024 * 1024
+        for value in ("", "abc", "0", "-5"):
+            monkeypatch.setenv("REMARKABLE_UPLOAD_MAX_BYTES", value)
+            assert _upload_max_bytes() == DEFAULT_UPLOAD_MAX_BYTES
+        monkeypatch.setenv("REMARKABLE_UPLOAD_MAX_BYTES", "1234")
+        assert _upload_max_bytes() == 1234
+
+    @pytest.mark.asyncio
+    async def test_allowlist_refuses_outside_paths(self, tmp_path):
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        outside = tmp_path / "allowed-not" / "a.pdf"
+        outside.parent.mkdir()
+        outside.write_bytes(b"%PDF")
+        data, client = await self._upload(outside, REMARKABLE_UPLOAD_DIRS=str(allowed))
+        assert data["_error"]["type"] == "upload_path_not_allowed"
+        client.upload_document.assert_not_called()
+
+    @posix_only
+    @pytest.mark.asyncio
+    async def test_allowlist_checks_symlink_target(self, tmp_path):
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        target = tmp_path / "outside.pdf"
+        target.write_bytes(b"%PDF")
+        (allowed / "link.pdf").symlink_to(target)
+        data, _ = await self._upload(allowed / "link.pdf", REMARKABLE_UPLOAD_DIRS=str(allowed))
+        assert data["_error"]["type"] == "upload_path_not_allowed"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_accepts_any_listed_dir(self, tmp_path):
+        first, second = tmp_path / "one", tmp_path / "two"
+        first.mkdir()
+        second.mkdir()
+        pdf = second / "sub" / "a.pdf"
+        pdf.parent.mkdir()
+        pdf.write_bytes(b"%PDF")
+        dirs = os.pathsep.join([str(first), "", str(second)])
+        data, _ = await self._upload(pdf, REMARKABLE_UPLOAD_DIRS=dirs)
+        assert data["uploaded"] is True
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_is_not_blocked_by_allowlist(self, tmp_path):
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        client = _upload_client()
+        data = await _call_write_tool(
+            "remarkable_markdown_to_pdf",
+            {"markdown": "# Hello", "document_name": "Hello"},
+            client,
+            REMARKABLE_UPLOAD_DIRS=str(allowed),
+        )
+        assert data["uploaded"] is True
+        client.upload_document.assert_called_once()
