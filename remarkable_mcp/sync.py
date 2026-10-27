@@ -1223,10 +1223,8 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
     if token_data.startswith("eyJ"):
         return RemarkableClient(device_token=token_data, user_token="")
 
-    raise ValueError(
-        f"Invalid token format. Expected JSON or JWT token.\n"
-        f"Token starts with: {token_data[:20]}..."
-    )
+    # Never echo any part of the credential: errors end up in MCP responses/logs.
+    raise ValueError("Invalid token format. Expected JSON or JWT token.")
 
 
 def load_client_from_file(token_file: Path = Path.home() / ".rmapi") -> RemarkableClient:

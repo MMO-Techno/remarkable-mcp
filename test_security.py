@@ -123,3 +123,14 @@ class TestBlobHashValidation:
         assert client._cache_read("../escape") is None
         assert not (tmp_path / "escape").exists()
         assert not (tmp_path / "blobs").exists()
+
+
+class TestTokenNotLeaked:
+    def test_invalid_token_error_does_not_echo_token(self):
+        from remarkable_mcp.sync import load_client_from_token
+
+        secret = "not-a-jwt-SECRET-VALUE-0123456789"
+        with pytest.raises(ValueError) as excinfo:
+            load_client_from_token(secret)
+        assert "Invalid token format" in str(excinfo.value)
+        assert secret[:6] not in str(excinfo.value)
