@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -75,6 +76,19 @@ def _cache_dir() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".remarkable" / "cache" / "blobs"
+
+
+# Blobs are addressed by lowercase hex SHA-256 digests (see _hash_entries and
+# _upload_file_blob). Server-supplied hashes become cache filenames and URL path
+# segments, so anything else is refused rather than trusted.
+_BLOB_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _require_blob_hash(file_hash: str) -> str:
+    """Return ``file_hash`` if it is a well-formed blob hash, else raise ValueError."""
+    if not isinstance(file_hash, str) or not _BLOB_HASH_RE.fullmatch(file_hash):
+        raise ValueError(f"Refusing malformed blob hash from the cloud: {file_hash!r:.80}")
+    return file_hash
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -465,7 +479,7 @@ class RemarkableClient:
 
     def _cache_read(self, file_hash: str) -> Optional[bytes]:
         """Return cached bytes for a content hash, or None on miss/disabled."""
-        if not _cache_enabled():
+        if not _cache_enabled() or not _BLOB_HASH_RE.fullmatch(file_hash):
             return None
         try:
             path = _cache_dir() / file_hash
@@ -477,7 +491,11 @@ class RemarkableClient:
 
     def _cache_write(self, file_hash: str, content: bytes) -> None:
         """Persist bytes for a content hash (best-effort, atomic)."""
-        if not _cache_enabled() or len(content) > _cache_max_blob_bytes():
+        if (
+            not _cache_enabled()
+            or not _BLOB_HASH_RE.fullmatch(file_hash)
+            or len(content) > _cache_max_blob_bytes()
+        ):
             return
         try:
             cache_dir = _ensure_cache_dir()
@@ -500,6 +518,7 @@ class RemarkableClient:
         Blobs are content-addressed (immutable), so results are served from and
         stored in a local hash-keyed cache to make warm startups near-instant.
         """
+        _require_blob_hash(file_hash)
         cached = self._cache_read(file_hash)
         if cached is not None:
             return cached

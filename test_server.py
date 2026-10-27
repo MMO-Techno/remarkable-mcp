@@ -38,6 +38,13 @@ from remarkable_mcp.responses import (
 from remarkable_mcp.server import mcp
 
 
+def _blob_hash(label: str) -> str:
+    """Return a well-formed (SHA-256 hex) blob hash for a test label."""
+    import hashlib
+
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
 async def _call_tool(name: str, arguments: dict):
     """Call a tool directly for focused handler tests."""
     return await mcp.call_tool(name, arguments)
@@ -2651,10 +2658,10 @@ class TestCloudSyncFileHeaders:
         """Cloud sync list requests must send the logical filename for each blob."""
         from remarkable_mcp.sync import FILES_URL, RemarkableClient
 
-        root_hash = "root-hash"
+        root_hash = _blob_hash("root")
         doc_id = "doc-123"
-        doc_hash = "doc-hash"
-        metadata_hash = "metadata-hash"
+        doc_hash = _blob_hash("doc")
+        metadata_hash = _blob_hash("metadata")
 
         mock_request.side_effect = [
             self._response(text='{"hash": "root-hash"}', json_data={"hash": root_hash}),
@@ -2694,9 +2701,9 @@ class TestCloudSyncFileHeaders:
         from remarkable_mcp.sync import FILES_URL, Document, RemarkableClient
 
         doc_id = "doc-123"
-        doc_hash = "doc-hash"
-        content_hash = "content-hash"
-        page_hash = "page-hash"
+        doc_hash = _blob_hash("doc")
+        content_hash = _blob_hash("content")
+        page_hash = _blob_hash("page")
 
         index_bytes = (
             f"3\n{content_hash}:0:{doc_id}.content:0:18\n{page_hash}:0:{doc_id}/page-1.rm:0:9\n"
@@ -3907,8 +3914,8 @@ class TestCloudBlobCache:
         mock_request.return_value = self._response(content=b"blob-bytes")
         client = RemarkableClient(user_token="user-token")
 
-        first = client._get_file("hash-a", "a.docSchema")
-        second = client._get_file("hash-a", "a.docSchema")
+        first = client._get_file("a" * 64, "a.docSchema")
+        second = client._get_file("a" * 64, "a.docSchema")
 
         assert first == b"blob-bytes"
         assert second == b"blob-bytes"
@@ -3929,8 +3936,8 @@ class TestCloudBlobCache:
         ]
         client = RemarkableClient(user_token="user-token")
 
-        assert client._get_file("hash-old", "doc.content") == b"old-content"
-        assert client._get_file("hash-new", "doc.content") == b"new-content"
+        assert client._get_file("b" * 64, "doc.content") == b"old-content"
+        assert client._get_file("c" * 64, "doc.content") == b"new-content"
         assert mock_request.call_count == 2
 
     @patch("remarkable_mcp.sync._http_request_with_retry")
@@ -3945,8 +3952,8 @@ class TestCloudBlobCache:
         ]
         client = RemarkableClient(user_token="user-token")
 
-        client._get_file("hash-a", "a.docSchema")
-        client._get_file("hash-a", "a.docSchema")
+        client._get_file("a" * 64, "a.docSchema")
+        client._get_file("a" * 64, "a.docSchema")
         assert mock_request.call_count == 2
 
     @patch("remarkable_mcp.sync._http_request_with_retry")
@@ -3962,8 +3969,8 @@ class TestCloudBlobCache:
         ]
         client = RemarkableClient(user_token="user-token")
 
-        client._get_file("hash-big", "big.bin")
-        client._get_file("hash-big", "big.bin")
+        client._get_file("d" * 64, "big.bin")
+        client._get_file("d" * 64, "big.bin")
         assert mock_request.call_count == 2
 
 
@@ -4014,21 +4021,21 @@ class TestParallelDownload:
         from remarkable_mcp.sync import Document, RemarkableClient
 
         doc_id = "doc-1"
-        index = "3\n" + "".join(f"hash-{i}:0:{doc_id}/page-{i}.rm:0:5\n" for i in range(10))
+        index = "3\n" + "".join(f"{i:064x}:0:{doc_id}/page-{i}.rm:0:5\n" for i in range(10))
 
         # Key responses by hash (the real client fetches FILES_URL/<hash>), so
         # the test is deterministic regardless of the order parallel workers run.
         def fake_request(method, url, **kwargs):
             blob_hash = url.rsplit("/", 1)[-1]
-            if blob_hash == "doc-hash":
+            if blob_hash == "f" * 64:
                 return self._response(content=index.encode("utf-8"))
-            idx = int(blob_hash.split("-")[1])
+            idx = int(blob_hash, 16)
             return self._response(content=f"page-{idx}".encode("utf-8"))
 
         mock_request.side_effect = fake_request
 
         client = RemarkableClient(user_token="user-token")
-        doc = Document(id=doc_id, hash="doc-hash", name="N", doc_type="DocumentType")
+        doc = Document(id=doc_id, hash="f" * 64, name="N", doc_type="DocumentType")
         payload = client.download(doc)
 
         with zipfile.ZipFile(io.BytesIO(payload)) as zf:

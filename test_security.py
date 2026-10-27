@@ -92,3 +92,34 @@ class TestBlobCachePermissions:
         assert _mode(shared) == 0o755
         assert _mode(shared / "blobs") == 0o700
         assert _mode(shared / "blobs" / self.BLOB_HASH) == 0o600
+
+
+class TestBlobHashValidation:
+    @pytest.mark.parametrize(
+        "bad_hash",
+        ["../../.rmapi", "A" * 64, "a" * 63, "a" * 65, "", "a" * 63 + "/", "g" * 64],
+    )
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_malformed_hash_is_refused_without_network_or_disk(
+        self, mock_request, bad_hash, monkeypatch, tmp_path
+    ):
+        from remarkable_mcp.sync import RemarkableClient
+
+        monkeypatch.setenv("REMARKABLE_CACHE_DIR", str(tmp_path / "blobs"))
+        client = RemarkableClient(user_token="user-token")
+
+        with pytest.raises(ValueError, match="malformed blob hash"):
+            client._get_file(bad_hash, "x")
+
+        mock_request.assert_not_called()
+        assert not (tmp_path / "blobs").exists()
+
+    def test_cache_helpers_ignore_malformed_hash(self, monkeypatch, tmp_path):
+        from remarkable_mcp.sync import RemarkableClient
+
+        monkeypatch.setenv("REMARKABLE_CACHE_DIR", str(tmp_path / "blobs"))
+        client = RemarkableClient(user_token="user-token")
+        client._cache_write("../escape", b"data")
+        assert client._cache_read("../escape") is None
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "blobs").exists()
