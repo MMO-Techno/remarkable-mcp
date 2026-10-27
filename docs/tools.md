@@ -34,6 +34,7 @@ All tools respect the `REMARKABLE_ROOT_PATH` environment variable. When configur
 With this configuration:
 - Paths in responses are relative to the root (e.g., `/Work/Project` appears as `/Project`)
 - Documents outside the root are not accessible
+- Write tools resolve `document`, `parent`, `parent_folder` and `dest_folder` relative to the root (`/` is the root folder itself), cannot target anything outside it or the root folder itself, and never match trashed items. USB web uploads are refused because the tablet picks the destination folder
 - `remarkable_status()` shows the configured root and document count within that folder
 
 ---

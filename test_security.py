@@ -134,3 +134,184 @@ class TestTokenNotLeaked:
             load_client_from_token(secret)
         assert "Invalid token format" in str(excinfo.value)
         assert secret[:6] not in str(excinfo.value)
+
+
+def _item(doc_id, name, parent="", is_folder=False):
+    item = Mock()
+    item.ID = doc_id
+    item.VissibleName = name
+    item.Parent = parent
+    item.is_folder = is_folder
+    return item
+
+
+def _library():
+    return [
+        _item("work", "Work", is_folder=True),
+        _item("sub", "Sub", parent="work", is_folder=True),
+        _item("report", "Report", parent="work"),
+        _item("private", "Private", is_folder=True),
+        _item("secret", "Secret", parent="private"),
+        _item("top", "Top Level"),
+        _item("binned", "Binned", parent="trash"),
+        _item("old", "Old", parent="trash", is_folder=True),
+        _item("orphan", "Orphan", parent="old"),
+    ]
+
+
+class TestWriteToolRootPath:
+    def _resolve(self, name, **kwargs):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_document
+
+        collection = _library()
+        item = _resolve_document(name, collection, get_items_by_id(collection), **kwargs)
+        return item.ID if item else None
+
+    def _parent(self, path):
+        from remarkable_mcp.api import get_items_by_id
+        from remarkable_mcp.write_tools import _resolve_parent_id
+
+        collection = _library()
+        return _resolve_parent_id(path, get_items_by_id(collection), collection)
+
+    def test_documents_resolve_relative_to_root(self, monkeypatch):
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Work")
+        assert self._resolve("Report") == "report"
+        assert self._resolve("/Report") == "report"
+        assert self._resolve("report") == "report"
+        assert self._resolve("Sub", folders_only=True) == "sub"
+
+    @pytest.mark.parametrize(
+        "name", ["Secret", "/Private/Secret", "Private", "Top Level", "Work", "/", ""]
+    )
+    def test_documents_outside_root_or_root_itself_do_not_resolve(self, monkeypatch, name):
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "Work/")
+        assert self._resolve(name) is None
+
+    def test_parent_folders_resolve_relative_to_root(self, monkeypatch):
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Work")
+        assert self._parent("/") == "work"
+        assert self._parent("") == "work"
+        assert self._parent("/Sub") == "sub"
+        assert self._parent("/Private") is None
+        assert self._parent("/Work") is None
+
+    def test_missing_root_folder_resolves_nothing(self, monkeypatch):
+        monkeypatch.setenv("REMARKABLE_ROOT_PATH", "/Nope")
+        assert self._parent("/") is None
+        assert self._resolve("Report") is None
+
+    def test_unscoped_behaviour_is_unchanged(self, monkeypatch):
+        monkeypatch.delenv("REMARKABLE_ROOT_PATH", raising=False)
+        assert self._parent("/") == ""
+        assert self._parent("/Work/Sub") == "sub"
+        assert self._resolve("Secret") == "secret"
+        assert self._resolve("/Private/Secret") == "secret"
+        assert self._resolve("Work") == "work"
+
+    @pytest.mark.parametrize("name", ["Binned", "/Binned", "Old", "Orphan", "/Old/Orphan"])
+    def test_trashed_items_never_match(self, monkeypatch, name):
+        monkeypatch.delenv("REMARKABLE_ROOT_PATH", raising=False)
+        assert self._resolve(name) is None
+
+    def test_trashed_folder_is_not_a_destination(self, monkeypatch):
+        monkeypatch.delenv("REMARKABLE_ROOT_PATH", raising=False)
+        assert self._parent("/Old") is None
+
+
+_TRANSPORT_ENV = (
+    "REMARKABLE_USE_SSH",
+    "REMARKABLE_USE_USB_WEB",
+    "REMARKABLE_USE_LOCAL_DIR",
+    "REMARKABLE_LOCAL_DIR",
+    "REMARKABLE_READ_ONLY",
+)
+
+
+async def _call_write_tool(name, args, client, **env):
+    """Register write tools under ``env`` (cloud mode by default) and call one."""
+    import json
+
+    from remarkable_mcp.server import mcp
+    from remarkable_mcp.write_tools import register_write_tools
+
+    clean = {k: v for k, v in os.environ.items() if k not in _TRANSPORT_ENV}
+    clean.update(env)
+    registered = dict(mcp._tool_manager._tools)
+    with patch.dict(os.environ, clean, clear=True):
+        try:
+            register_write_tools()
+            with patch("remarkable_mcp.write_tools.get_rmapi", return_value=client):
+                result = await mcp.call_tool(name, args)
+        finally:
+            mcp._tool_manager._tools.clear()
+            mcp._tool_manager._tools.update(registered)
+    return json.loads(result.content[0].text)
+
+
+class TestWriteToolRootPathDispatch:
+    @pytest.mark.asyncio
+    async def test_cloud_move_cannot_target_outside_root(self):
+        client = Mock(spec=["get_meta_items", "move"])
+        client.get_meta_items.return_value = _library()
+        data = await _call_write_tool(
+            "remarkable_move",
+            {"document": "Secret", "dest_folder": "/"},
+            client,
+            REMARKABLE_ROOT_PATH="/Work",
+        )
+        assert data["_error"]["type"] == "document_not_found"
+        assert "Secret" not in str(data["_error"].get("did_you_mean"))
+        client.move.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cloud_move_into_root_uses_root_folder(self):
+        client = Mock(spec=["get_meta_items", "move"])
+        client.get_meta_items.return_value = _library()
+        data = await _call_write_tool(
+            "remarkable_move",
+            {"document": "/Sub", "dest_folder": "/"},
+            client,
+            REMARKABLE_ROOT_PATH="/Work",
+        )
+        assert data["moved"] is True
+        client.move.assert_called_once_with("sub", "work")
+
+    @pytest.mark.asyncio
+    async def test_cloud_mkdir_outside_root_is_refused(self):
+        client = Mock(spec=["get_meta_items", "create_folder"])
+        client.get_meta_items.return_value = _library()
+        data = await _call_write_tool(
+            "remarkable_mkdir",
+            {"folder_name": "X", "parent": "/Private"},
+            client,
+            REMARKABLE_ROOT_PATH="/Work",
+        )
+        assert data["_error"]["type"] == "folder_not_found"
+        client.create_folder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cloud_delete_skips_trashed_name_match(self):
+        client = Mock(spec=["get_meta_items", "delete"])
+        client.get_meta_items.return_value = _library()
+        data = await _call_write_tool(
+            "remarkable_delete", {"document": "Binned"}, client, REMARKABLE_SKIP_CONFIRM="1"
+        )
+        assert data["_error"]["type"] == "document_not_found"
+        client.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_usb_web_upload_refused_when_root_is_set(self, tmp_path):
+        pdf = tmp_path / "a.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n")
+        with patch("remarkable_mcp.write_tools._upload_via_usb_web") as upload:
+            data = await _call_write_tool(
+                "remarkable_upload",
+                {"file_path": str(pdf)},
+                Mock(),
+                REMARKABLE_USE_USB_WEB="1",
+                REMARKABLE_ROOT_PATH="/Work",
+            )
+        assert data["_error"]["type"] == "root_path_unsupported"
+        upload.assert_not_called()
