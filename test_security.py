@@ -43,3 +43,52 @@ class TestTokenFilePermissions:
         finally:
             os.umask(old)
         assert _mode(tmp_path / "secret") == 0o600
+
+
+class TestBlobCachePermissions:
+    BLOB_HASH = "a" * 64
+
+    def _client(self, mock_request, content=b"blob"):
+        from remarkable_mcp.sync import RemarkableClient
+
+        response = Mock(status_code=200, content=content, headers={})
+        response.raise_for_status = Mock()
+        mock_request.return_value = response
+        return RemarkableClient(user_token="user-token")
+
+    @posix_only
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_default_cache_dirs_and_blobs_are_private(self, mock_request, monkeypatch, tmp_path):
+        monkeypatch.delenv("REMARKABLE_CACHE_DIR", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".remarkable").mkdir(mode=0o755)
+        client = self._client(mock_request)
+
+        old = os.umask(0)
+        try:
+            client._get_file(self.BLOB_HASH, "a.docSchema")
+        finally:
+            os.umask(old)
+
+        base = tmp_path / ".remarkable"
+        for path in (base, base / "cache", base / "cache" / "blobs"):
+            assert _mode(path) == 0o700, path
+        blob = base / "cache" / "blobs" / self.BLOB_HASH
+        assert blob.read_bytes() == b"blob"
+        assert _mode(blob) == 0o600
+        assert sorted(p.name for p in blob.parent.iterdir()) == [self.BLOB_HASH]
+
+    @posix_only
+    @patch("remarkable_mcp.sync._http_request_with_retry")
+    def test_override_cache_dir_only_tightens_leaf(self, mock_request, monkeypatch, tmp_path):
+        shared = tmp_path / "shared"
+        shared.mkdir(mode=0o755)
+        os.chmod(shared, 0o755)
+        monkeypatch.setenv("REMARKABLE_CACHE_DIR", str(shared / "blobs"))
+        client = self._client(mock_request)
+
+        client._get_file(self.BLOB_HASH, "a.docSchema")
+
+        assert _mode(shared) == 0o755
+        assert _mode(shared / "blobs") == 0o700
+        assert _mode(shared / "blobs" / self.BLOB_HASH) == 0o600

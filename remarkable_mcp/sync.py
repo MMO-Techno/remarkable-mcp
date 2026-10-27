@@ -77,6 +77,29 @@ def _cache_dir() -> Path:
     return Path.home() / ".remarkable" / "cache" / "blobs"
 
 
+def _ensure_private_dir(path: Path) -> None:
+    """Create ``path`` (mode 0700) if needed and strip group/other access."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix" and path.stat().st_mode & 0o077:
+        os.chmod(path, 0o700)
+
+
+def _ensure_cache_dir() -> Path:
+    """Return the blob cache directory, created private to the current user.
+
+    For the default location, ``~/.remarkable`` and ``~/.remarkable/cache`` are
+    made private too. A ``REMARKABLE_CACHE_DIR`` override only has its leaf
+    directory tightened, since its parents may be shared (e.g. ``/tmp``).
+    """
+    cache_dir = _cache_dir()
+    if os.environ.get("REMARKABLE_CACHE_DIR"):
+        _ensure_private_dir(cache_dir)
+    else:
+        for path in (cache_dir.parent.parent, cache_dir.parent, cache_dir):
+            _ensure_private_dir(path)
+    return cache_dir
+
+
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
 # So we use webapp-prod.cloud.remarkable.engineering for auth
@@ -457,12 +480,17 @@ class RemarkableClient:
         if not _cache_enabled() or len(content) > _cache_max_blob_bytes():
             return
         try:
-            cache_dir = _cache_dir()
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = _ensure_cache_dir()
             path = cache_dir / file_hash
-            tmp = cache_dir / f".{file_hash}.{os.getpid()}.tmp"
-            tmp.write_bytes(content)
-            os.replace(tmp, path)
+            tmp = cache_dir / f".{file_hash}.{os.getpid()}.{threading.get_ident()}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(content)
+                os.replace(tmp, path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
         except Exception as e:  # pragma: no cover - cache must never break fetches
             logger.debug(f"Blob cache write failed for {file_hash}: {e}")
 

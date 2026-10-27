@@ -270,8 +270,8 @@ def get_active_transport() -> str:
 
 def ensure_config_dir():
     """Ensure configuration directory exists."""
-    REMARKABLE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    REMARKABLE_CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def write_private_file(path: Path, text: str) -> None:
