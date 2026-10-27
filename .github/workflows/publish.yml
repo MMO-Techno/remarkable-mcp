@@ -30,6 +30,8 @@ jobs:
           prerelease: false
 
   test:
+    # Every other job depends on this one, so forks never publish on tag pushes.
+    if: github.repository == 'SamMorrowDrums/remarkable-mcp'
     runs-on: ubuntu-latest
     permissions:
       contents: read
