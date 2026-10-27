@@ -19,6 +19,7 @@ from remarkable_mcp.extract import (
     _resolve_pdf_page_index,
     render_merged_page_from_extracted_document,
     render_page_full_page_from_extracted_document,
+    safe_extractall,
 )
 
 PdfMode = Literal["merged", "annotations"]
@@ -240,7 +241,7 @@ def render_archive_pages(
     with tempfile.TemporaryDirectory(prefix="remarkable-export-archive-") as tmpdir:
         extracted = Path(tmpdir)
         with zipfile.ZipFile(archive_path, "r") as archive:
-            archive.extractall(extracted)
+            safe_extractall(archive, extracted)
 
         has_source_pdf = any(extracted.glob("**/*.pdf"))
         for page_number in range(1, metadata.page_count + 1):

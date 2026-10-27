@@ -411,7 +411,10 @@ class USBWebClient:
             import io
             import zipfile
 
+            from remarkable_mcp.extract import check_archive_limits
+
             with zipfile.ZipFile(io.BytesIO(rmdoc_data)) as z:
+                check_archive_limits(z)
                 for name in z.namelist():
                     if name.endswith(f".{ext}"):
                         return z.read(name)

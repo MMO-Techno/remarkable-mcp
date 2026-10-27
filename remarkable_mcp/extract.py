@@ -16,6 +16,35 @@ from xml.sax.saxutils import escape as _xml_escape
 
 logger = logging.getLogger(__name__)
 
+# Upper bounds for document archives and EPUBs we open. Real documents are far
+# below these; they exist to stop zip bombs from exhausting disk or memory.
+# zipfile never yields more than an entry's declared size, so summing the
+# declared sizes bounds what extraction can write.
+MAX_ARCHIVE_MEMBERS = 20_000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 * 1024**3
+
+
+def check_archive_limits(zf: zipfile.ZipFile) -> None:
+    """Raise ValueError if an archive has too many members or is too large unpacked."""
+    infos = zf.infolist()
+    if len(infos) > MAX_ARCHIVE_MEMBERS:
+        raise ValueError(f"Archive has {len(infos)} members (limit {MAX_ARCHIVE_MEMBERS})")
+    total = sum(info.file_size for info in infos)
+    if total > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+        raise ValueError(
+            f"Archive expands to {total} bytes (limit {MAX_ARCHIVE_UNCOMPRESSED_BYTES})"
+        )
+
+
+def safe_extractall(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract an archive after checking size limits.
+
+    ``ZipFile.extractall`` already drops absolute paths and ``..`` components,
+    so members cannot be written outside ``dest`` (zip-slip).
+    """
+    check_archive_limits(zf)
+    zf.extractall(dest)
+
 
 def _rm_to_svg(rm_file_path: Path, output_svg_path: Path) -> bool:
     """Convert a .rm file to SVG using the built-in rmscene renderers.
@@ -322,6 +351,8 @@ def extract_text_from_epub(epub_path: Path) -> str:
         from bs4 import BeautifulSoup
         from ebooklib import ITEM_DOCUMENT, epub
 
+        with zipfile.ZipFile(epub_path) as zf:
+            check_archive_limits(zf)
         book = epub.read_epub(str(epub_path), options={"ignore_ncx": True})
         text_parts = []
 
@@ -1319,7 +1350,7 @@ def render_page_from_document_zip_svg(
         tmpdir_path = Path(tmpdir)
 
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
+            safe_extractall(zf, tmpdir_path)
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
@@ -1351,7 +1382,7 @@ def render_page_from_document_zip(
         tmpdir_path = Path(tmpdir)
 
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
+            safe_extractall(zf, tmpdir_path)
 
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
@@ -1398,7 +1429,7 @@ def render_page_full_page_from_document_zip(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
+            safe_extractall(zf, tmpdir_path)
 
         return render_page_full_page_from_extracted_document(
             tmpdir_path,
@@ -1666,7 +1697,7 @@ def render_mapped_pdf_page_from_document_zip(
         tmpdir_path = Path(tmpdir)
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(tmpdir_path)
+                safe_extractall(zf, tmpdir_path)
         except Exception:
             return None, False
 
@@ -1720,7 +1751,7 @@ def render_merged_page_from_document_zip(
 
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(tmpdir_path)
+                safe_extractall(zf, tmpdir_path)
         except Exception:
             return None, "Could not extract document archive."
 
@@ -1915,7 +1946,7 @@ def get_document_page_count(zip_path: Path) -> int:
         tmpdir_path = Path(tmpdir)
 
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
+            safe_extractall(zf, tmpdir_path)
 
         # Try .content metadata first — it's the authoritative page list
         for content_file in tmpdir_path.glob("*.content"):
@@ -2052,7 +2083,7 @@ def extract_text_from_document_zip(
         tmpdir_path = Path(tmpdir)
 
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
+            safe_extractall(zf, tmpdir_path)
 
         # Get page order from .content file
         page_order = []

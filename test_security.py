@@ -422,3 +422,59 @@ class TestUploadLocalPathPolicy:
         )
         assert data["uploaded"] is True
         client.upload_document.assert_called_once()
+
+
+class TestArchiveLimits:
+    def _zip(self, path, members):
+        import zipfile
+
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in members:
+                zf.writestr(name, data)
+        return path
+
+    def test_member_count_limit(self, monkeypatch, tmp_path):
+        import zipfile
+
+        from remarkable_mcp import extract
+
+        monkeypatch.setattr(extract, "MAX_ARCHIVE_MEMBERS", 3)
+        archive = self._zip(tmp_path / "a.zip", [(f"{i}.rm", b"x") for i in range(4)])
+        with zipfile.ZipFile(archive) as zf, pytest.raises(ValueError, match="members"):
+            extract.safe_extractall(zf, tmp_path / "out")
+        assert not (tmp_path / "out").exists()
+
+    def test_uncompressed_size_limit(self, monkeypatch, tmp_path):
+        import zipfile
+
+        from remarkable_mcp import extract
+
+        monkeypatch.setattr(extract, "MAX_ARCHIVE_UNCOMPRESSED_BYTES", 1024)
+        # Highly compressible payload: small on disk, large when expanded.
+        archive = self._zip(tmp_path / "bomb.zip", [("page.rm", b"\0" * 4096)])
+        assert archive.stat().st_size < 1024
+        with zipfile.ZipFile(archive) as zf, pytest.raises(ValueError, match="expands"):
+            extract.safe_extractall(zf, tmp_path / "out")
+
+    def test_within_limits_extracts_and_blocks_zip_slip(self, tmp_path):
+        import zipfile
+
+        from remarkable_mcp import extract
+
+        archive = self._zip(tmp_path / "a.zip", [("ok.rm", b"1"), ("../../evil.txt", b"2")])
+        out = tmp_path / "deep" / "out"
+        with zipfile.ZipFile(archive) as zf:
+            extract.safe_extractall(zf, out)
+        assert (out / "ok.rm").read_bytes() == b"1"
+        assert (out / "evil.txt").read_bytes() == b"2"
+        assert not (tmp_path / "evil.txt").exists()
+        assert not (tmp_path / "deep" / "evil.txt").exists()
+
+    def test_oversized_epub_is_not_parsed(self, monkeypatch, tmp_path):
+        from remarkable_mcp import extract
+
+        monkeypatch.setattr(extract, "MAX_ARCHIVE_UNCOMPRESSED_BYTES", 10)
+        epub = self._zip(tmp_path / "b.epub", [("mimetype", b"application/epub+zip" * 4)])
+        with patch("ebooklib.epub.read_epub") as read_epub:
+            assert extract.extract_text_from_epub(epub) == ""
+        read_epub.assert_not_called()
