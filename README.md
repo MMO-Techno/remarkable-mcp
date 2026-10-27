@@ -24,6 +24,11 @@ OpenWebUI, and other compatible tools.
 
 ## Quick Install
 
+> **Setting this up for a team?** [docs/team-setup.md](docs/team-setup.md) covers a
+> one-command, per-user installer (macOS, Linux, Windows) that pins a release,
+> registers each person's own reMarkable account, and configures Claude Code and
+> Claude Desktop in read-only mode.
+
 ### Prerequisite: install `uv`
 
 The commands below use `uvx`, which is included with [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
@@ -880,6 +885,7 @@ The cache is purely a local accelerator: deleting `REMARKABLE_CACHE_DIR` only fo
 
 | Guide | Description |
 |-------|-------------|
+| [Team Setup](docs/team-setup.md) | Per-user installer for Claude Code / Claude Desktop |
 | [SSH Setup](docs/ssh-setup.md) | Enable developer mode and configure SSH |
 | [Google Vision Setup](docs/google-vision-setup.md) | Set up handwriting OCR |
 | [Tools Reference](docs/tools.md) | Detailed tool documentation |
