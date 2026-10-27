@@ -274,6 +274,33 @@ def ensure_config_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def write_private_file(path: Path, text: str) -> None:
+    """Atomically write ``text`` to ``path`` readable only by the current user.
+
+    The data is written to a temporary file created with mode 0600 in the same
+    directory and then moved into place, so the credential is never briefly
+    world-readable and an existing file with looser permissions is replaced.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # pragma: no cover - e.g. filesystems without POSIX modes
+        pass
+
+
 def register_and_get_token(one_time_code: str) -> str:
     """
     Register with reMarkable using a one-time code and return the token.
@@ -288,7 +315,7 @@ def register_and_get_token(one_time_code: str) -> str:
         # Save to ~/.rmapi for compatibility
         rmapi_file = Path.home() / ".rmapi"
         token_json = json_module.dumps(token_data)
-        rmapi_file.write_text(token_json)
+        write_private_file(rmapi_file, token_json)
 
         # A new token invalidates any cached cloud client.
         reset_client_cache()
