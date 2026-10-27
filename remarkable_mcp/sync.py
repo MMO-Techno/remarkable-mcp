@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -75,6 +76,42 @@ def _cache_dir() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".remarkable" / "cache" / "blobs"
+
+
+# Blobs are addressed by lowercase hex SHA-256 digests (see _hash_entries and
+# _upload_file_blob). Server-supplied hashes become cache filenames and URL path
+# segments, so anything else is refused rather than trusted.
+_BLOB_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _require_blob_hash(file_hash: str) -> str:
+    """Return ``file_hash`` if it is a well-formed blob hash, else raise ValueError."""
+    if not isinstance(file_hash, str) or not _BLOB_HASH_RE.fullmatch(file_hash):
+        raise ValueError(f"Refusing malformed blob hash from the cloud: {file_hash!r:.80}")
+    return file_hash
+
+
+def _ensure_private_dir(path: Path) -> None:
+    """Create ``path`` (mode 0700) if needed and strip group/other access."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix" and path.stat().st_mode & 0o077:
+        os.chmod(path, 0o700)
+
+
+def _ensure_cache_dir() -> Path:
+    """Return the blob cache directory, created private to the current user.
+
+    For the default location, ``~/.remarkable`` and ``~/.remarkable/cache`` are
+    made private too. A ``REMARKABLE_CACHE_DIR`` override only has its leaf
+    directory tightened, since its parents may be shared (e.g. ``/tmp``).
+    """
+    cache_dir = _cache_dir()
+    if os.environ.get("REMARKABLE_CACHE_DIR"):
+        _ensure_private_dir(cache_dir)
+    else:
+        for path in (cache_dir.parent.parent, cache_dir.parent, cache_dir):
+            _ensure_private_dir(path)
+    return cache_dir
 
 
 # API endpoints
@@ -442,7 +479,7 @@ class RemarkableClient:
 
     def _cache_read(self, file_hash: str) -> Optional[bytes]:
         """Return cached bytes for a content hash, or None on miss/disabled."""
-        if not _cache_enabled():
+        if not _cache_enabled() or not _BLOB_HASH_RE.fullmatch(file_hash):
             return None
         try:
             path = _cache_dir() / file_hash
@@ -454,15 +491,24 @@ class RemarkableClient:
 
     def _cache_write(self, file_hash: str, content: bytes) -> None:
         """Persist bytes for a content hash (best-effort, atomic)."""
-        if not _cache_enabled() or len(content) > _cache_max_blob_bytes():
+        if (
+            not _cache_enabled()
+            or not _BLOB_HASH_RE.fullmatch(file_hash)
+            or len(content) > _cache_max_blob_bytes()
+        ):
             return
         try:
-            cache_dir = _cache_dir()
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = _ensure_cache_dir()
             path = cache_dir / file_hash
-            tmp = cache_dir / f".{file_hash}.{os.getpid()}.tmp"
-            tmp.write_bytes(content)
-            os.replace(tmp, path)
+            tmp = cache_dir / f".{file_hash}.{os.getpid()}.{threading.get_ident()}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(content)
+                os.replace(tmp, path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
         except Exception as e:  # pragma: no cover - cache must never break fetches
             logger.debug(f"Blob cache write failed for {file_hash}: {e}")
 
@@ -472,6 +518,7 @@ class RemarkableClient:
         Blobs are content-addressed (immutable), so results are served from and
         stored in a local hash-keyed cache to make warm startups near-instant.
         """
+        _require_blob_hash(file_hash)
         cached = self._cache_read(file_hash)
         if cached is not None:
             return cached
@@ -1176,10 +1223,8 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
     if token_data.startswith("eyJ"):
         return RemarkableClient(device_token=token_data, user_token="")
 
-    raise ValueError(
-        f"Invalid token format. Expected JSON or JWT token.\n"
-        f"Token starts with: {token_data[:20]}..."
-    )
+    # Never echo any part of the credential: errors end up in MCP responses/logs.
+    raise ValueError("Invalid token format. Expected JSON or JWT token.")
 
 
 def load_client_from_file(token_file: Path = Path.home() / ".rmapi") -> RemarkableClient:

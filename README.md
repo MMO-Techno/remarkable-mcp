@@ -24,6 +24,11 @@ OpenWebUI, and other compatible tools.
 
 ## Quick Install
 
+> **Setting this up for a team?** [docs/team-setup.md](docs/team-setup.md) covers a
+> one-command, per-user installer (macOS, Linux, Windows) that pins a release,
+> registers each person's own reMarkable account, and configures Claude Code and
+> Claude Desktop in read-only mode.
+
 ### Prerequisite: install `uv`
 
 The commands below use `uvx`, which is included with [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
@@ -678,6 +683,7 @@ Or set the environment variable:
 ### Safety
 
 - **Upload registers in cloud, SSH, and USB web mode** — local-directory mode never exposes write tools.
+- **Upload only reads regular PDF/EPUB files** — `remarkable_upload` resolves symlinks and requires the target itself to be a regular `.pdf`/`.epub` file no larger than `REMARKABLE_UPLOAD_MAX_BYTES` (default `209715200`, 200 MiB). Set `REMARKABLE_UPLOAD_DIRS` to an `os.pathsep`-separated list of directories (`:` on macOS/Linux, `;` on Windows) to only allow uploads from inside them; unset means any readable path.
 - **mkdir, move, rename, delete register in cloud and SSH modes only** — they are not exposed on USB web (the tablet's USB web firmware has no folder/move/rename/delete endpoints), keeping the tool list scoped to what the active transport actually supports.
 - **Delete prompts for confirmation when possible** — if the client supports MCP elicitation, `remarkable_delete` asks the user to confirm before deleting. MCP SDK 2.x carries that prompt as a multi-round input request for `2026-07-28` clients and as push elicitation for legacy clients. If the client can't show a prompt, the delete is **refused** (not performed) unless `REMARKABLE_SKIP_CONFIRM=1` is set — so write-on-by-default can't silently delete from clients that lack elicitation. Cloud and SSH move items to Trash by default. SSH also supports `permanent=True` for an explicitly requested permanent removal; cloud permanent deletion remains a Trash-management operation in the app/tablet. Set `REMARKABLE_SKIP_CONFIRM=1` to allow deletes without a prompt in automated setups. All write tools carry `ToolAnnotations(read_only_hint=False)` (and `destructive_hint=True` for delete) so an agent harness can gate writes at the MCP layer.
 - **SSH work is fair and serialized per server** — one FIFO dispatcher owns every SSH subprocess, so startup scans, reads, uploads, mutations, and refresh probes cannot churn the tablet's USB CDC connection concurrently. Cached metadata reads bypass the queue.
@@ -797,7 +803,7 @@ Limit the MCP server to a specific folder on your reMarkable. All operations wil
 With this configuration:
 - `remarkable_browse("/")` shows contents of `/Work`
 - `remarkable_browse("/Projects")` shows `/Work/Projects`
-- Documents outside `/Work` are not accessible
+- Documents outside `/Work` are not accessible, including to write tools (`remarkable_move("Notes", "/")` moves into `/Work`)
 
 Useful for:
 - Focusing on work documents during office hours
@@ -879,6 +885,7 @@ The cache is purely a local accelerator: deleting `REMARKABLE_CACHE_DIR` only fo
 
 | Guide | Description |
 |-------|-------------|
+| [Team Setup](docs/team-setup.md) | Per-user installer for Claude Code / Claude Desktop |
 | [SSH Setup](docs/ssh-setup.md) | Enable developer mode and configure SSH |
 | [Google Vision Setup](docs/google-vision-setup.md) | Set up handwriting OCR |
 | [Tools Reference](docs/tools.md) | Detailed tool documentation |
